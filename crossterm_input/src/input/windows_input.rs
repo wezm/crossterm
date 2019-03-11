@@ -18,6 +18,8 @@ use winapi::um::{
         MOUSE_EVENT_RECORD, WINDOW_BUFFER_SIZE_EVENT,
     },
 };
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::Receiver;
 
 pub struct WindowsInput;
 
@@ -67,43 +69,34 @@ impl ITerminalInput for WindowsInput {
         }
     }
 
-    fn read_async(&self, _stdout: &Option<&Arc<TerminalOutput>>) -> AsyncReader {
-        let (tx, rx) = mpsc::channel();
-
-        // TODO: drop this thread once finished
-        thread::spawn(move || loop {
+    fn read_async(&self, _stdout: &Option<&Arc<TerminalOutput>>) -> AsyncReader<dyn for<'r> std::ops::Fn(&'r Sender<InputEvent>) + 'static> {
+       AsyncReader::new(|event_tx|
+       {
             for i in into_virtual_terminal_sequence().unwrap() {
-                if tx.send(Ok(i)).is_err() {
+                if event_tx.send(Ok(i)).is_err() {
                     return;
                 }
             }
-            thread::sleep(std::time::Duration::from_millis(50));
-        });
-
-        AsyncReader { recv: rx }
+        })
     }
 
     fn read_until_async(
         &self,
         delimiter: u8,
         _stdout: &Option<&Arc<TerminalOutput>>,
-    ) -> AsyncReader {
-        let (tx, rx) = mpsc::channel();
-
-        // TODO: drop this thread once finished
-        thread::spawn(move || loop {
-            for i in into_virtual_terminal_sequence().unwrap() {
-                if i == delimiter {
-                    return;
-                } else {
-                    if tx.send(Ok(i)).is_err() {
-                        return;
-                    }
-                }
-            }
-        });
-
-        AsyncReader { recv: rx }
+    ) -> AsyncReader<dyn for<'r> std::ops::Fn(&'r Sender<InputEvent>) + 'static> {
+        AsyncReader::new(|event_tx|
+         {
+             for i in into_virtual_terminal_sequence().unwrap() {
+                 if i == delimiter {
+                     return;
+                 } else {
+                     if tx.send(Ok(i)).is_err() {
+                         return;
+                     }
+                 }
+             }
+         })
     }
 
     fn enable_mouse_mode(&self, __stdout: &Option<&Arc<TerminalOutput>>) -> io::Result<()> {
