@@ -16,7 +16,7 @@ pub fn read_async() {
     let input = TerminalInput::from_output(&screen.stdout);
     input.enable_mouse_mode().unwrap();
 
-    let stdin = input.read_async();
+    let stdin = input.read_until_async(b'x');
     let mut stdin = stdin.start_receiving();
 
     for i in 0..100 {

@@ -21,6 +21,7 @@ use winapi::um::{
     },
 };
 use std::time::Duration;
+use std::io::Write;
 
 pub struct WindowsInput;
 
@@ -71,7 +72,7 @@ impl ITerminalInput for WindowsInput {
     }
 
     fn read_async(&self, _stdout: &Option<&Arc<TerminalOutput>>) -> AsyncReader {
-        AsyncReader::new(Box::new(move |event_tx| {
+        AsyncReader::new(Box::new(move |event_tx, cancellation_token| {
             loop {
                 for i in into_virtual_terminal_sequence().unwrap() {
                     if event_tx.send(i).is_err() {
@@ -156,13 +157,13 @@ fn into_virtual_terminal_sequence() -> Result<Vec<u8>> {
                         // this is because unix limits key events to key press
                         continue;
                     }
-                    vts = handle_key_event(e);
+                    handle_key_event(e, &mut vts);
                 }
                 MOUSE_EVENT => {
                     let e = input.Event.MouseEvent();
                     // TODO: handle mouse events
                     // println!("{:?}", e.dwButtonState);
-                    vts = handle_mouse_event(e);
+                    handle_mouse_event(e, &mut vts);
                 }
                 // NOTE (@imdaveho): ignore below
                 WINDOW_BUFFER_SIZE_EVENT => (),
@@ -175,76 +176,75 @@ fn into_virtual_terminal_sequence() -> Result<Vec<u8>> {
     return Ok(vts);
 }
 
-fn handle_key_event(e: &KEY_EVENT_RECORD) -> Vec<u8> {
-    let mut seq = Vec::new();
+fn handle_key_event(e: &KEY_EVENT_RECORD, vts: &mut Vec<u8>) {
     let virtual_key = e.wVirtualKeyCode;
     match virtual_key {
         0x10 | 0x11 | 0x12 => {
             // ignore SHIFT, CTRL, ALT standalone presses
-            seq.push(b'\x00');
+            vts.push(b'\x00');
         }
         0x08 => {
             // BACKSPACE
-            seq.push(b'\x7F');
+            vts.push(b'\x7F');
         }
         0x1B => {
             // ESC
-            seq.push(b'\x1B');
+            vts.push(b'\x1B');
         }
         0x0D => {
             // ENTER
-            seq.push(b'\n');
+            vts.push(b'\n');
         }
         0x70 | 0x71 | 0x72 | 0x73 => {
             // F1 - F4 are support by default VT100
-            seq.push(b'\x1B');
-            seq.push(b'O');
-            seq.push([b'P', b'Q', b'R', b'S'][(virtual_key - 0x70) as usize]);
+            vts.push(b'\x1B');
+            vts.push(b'O');
+            vts.push([b'P', b'Q', b'R', b'S'][(virtual_key - 0x70) as usize]);
         }
         0x74 | 0x75 | 0x76 | 0x77 => {
             // NOTE: F Key Escape Codes:
             // http://aperiodic.net/phil/archives/Geekery/term-function-keys.html
             // https://docs.microsoft.com/en-us/windows/console/console-virtual-terminal-sequences
             // F5 - F8
-            seq.push(b'\x1B');
-            seq.push(b'[');
-            seq.push(b'1');
-            seq.push([b'5', b'7', b'8', b'9'][(virtual_key - 0x74) as usize]);
-            seq.push(b'~');
+            vts.push(b'\x1B');
+            vts.push(b'[');
+            vts.push(b'1');
+            vts.push([b'5', b'7', b'8', b'9'][(virtual_key - 0x74) as usize]);
+            vts.push(b'~');
         }
         0x78 | 0x79 | 0x7A | 0x7B => {
             // F9 - F12
-            seq.push(b'\x1B');
-            seq.push(b'[');
-            seq.push(b'2');
-            seq.push([b'0', b'1', b'3', b'4'][(virtual_key - 0x78) as usize]);
-            seq.push(b'~');
+            vts.push(b'\x1B');
+            vts.push(b'[');
+            vts.push(b'2');
+            vts.push([b'0', b'1', b'3', b'4'][(virtual_key - 0x78) as usize]);
+            vts.push(b'~');
         }
         0x25 | 0x26 | 0x27 | 0x28 => {
             // LEFT, UP, RIGHT, DOWN
-            seq.push(b'\x1B');
-            seq.push(b'[');
-            seq.push([b'D', b'A', b'C', b'B'][(virtual_key - 0x25) as usize]);
+            vts.push(b'\x1B');
+            vts.push(b'[');
+            vts.push([b'D', b'A', b'C', b'B'][(virtual_key - 0x25) as usize]);
         }
         0x21 | 0x22 => {
             // PAGEUP, PAGEDOWN
-            seq.push(b'\x1B');
-            seq.push(b'[');
-            seq.push([b'5', b'6'][(virtual_key - 0x21) as usize]);
-            seq.push(b'~');
+            vts.push(b'\x1B');
+            vts.push(b'[');
+            vts.push([b'5', b'6'][(virtual_key - 0x21) as usize]);
+            vts.push(b'~');
         }
         0x23 | 0x24 => {
             // END, HOME
-            seq.push(b'\x1B');
-            seq.push(b'[');
-            seq.push([b'F', b'H'][(virtual_key - 0x23) as usize]);
+            vts.push(b'\x1B');
+            vts.push(b'[');
+            vts.push([b'F', b'H'][(virtual_key - 0x23) as usize]);
         }
         0x2D | 0x2E => {
             // INSERT, DELETE
-            seq.push(b'\x1B');
-            seq.push(b'[');
-            seq.push([b'2', b'3'][(virtual_key - 0x2D) as usize]);
-            seq.push(b'~');
+            vts.push(b'\x1B');
+            vts.push(b'[');
+            vts.push([b'2', b'3'][(virtual_key - 0x2D) as usize]);
+            vts.push(b'~');
         }
         _ => {
             // Modifier Keys (Ctrl, Alt, Shift) Support
@@ -254,9 +254,9 @@ fn handle_key_event(e: &KEY_EVENT_RECORD) -> Vec<u8> {
             match e.dwControlKeyState {
                 0x0002 | 0x0101 | 0x0001 => {
                     // Alt + chr support
-                    seq.push(b'\x1B');
+                    vts.push(b'\x1B');
                     for ch in chars.iter() {
-                        seq.push(*ch);
+                        vts.push(*ch);
                     }
                 }
                 0x0008 | 0x0104 | 0x0004 => {
@@ -266,9 +266,9 @@ fn handle_key_event(e: &KEY_EVENT_RECORD) -> Vec<u8> {
                     for ch in chars.iter() {
                         // Constrain to only Aa-Zz keys
                         if alphabet.contains(&ch) {
-                            seq.push(*ch);
+                            vts.push(*ch);
                         } else {
-                            seq.push(b'\x00');
+                            vts.push(b'\x00');
                         }
                     }
                 }
@@ -276,18 +276,18 @@ fn handle_key_event(e: &KEY_EVENT_RECORD) -> Vec<u8> {
                     // TODO: Alt + Ctrl + Key support
                     // mainly updating the Alt section of parse_event()
                     // and updating parse_utf8_char()
-                    seq.push(b'\x00');
+                    vts.push(b'\x00');
                 }
                 0x001A | 0x0115 | 0x0015 => {
                     // TODO: Alt + Ctrl + Shift Key support
                     // mainly updating the Alt section of parse_event()
                     // and updating parse_utf8_char()
-                    seq.push(b'\x00');
+                    vts.push(b'\x00');
                 }
                 0x0000 => {
                     // Single key press
                     for ch in chars.iter() {
-                        seq.push(*ch);
+                        vts.push(*ch);
                     }
                 }
                 0x0010 => {
@@ -296,20 +296,18 @@ fn handle_key_event(e: &KEY_EVENT_RECORD) -> Vec<u8> {
                     // separating to be explicit about the Shift press
                     // for Event enum
                     for ch in chars.iter() {
-                        seq.push(*ch);
+                        vts.push(*ch);
                     }
                 }
                 _ => {
-                    seq.push(b'\x00');
+                    vts.push(b'\x00');
                 }
             }
         }
     };
-    return seq;
 }
 
-fn handle_mouse_event(e: &MOUSE_EVENT_RECORD) -> Vec<u8> {
-    let mut seq = Vec::new();
+fn handle_mouse_event(e: &MOUSE_EVENT_RECORD, vts: &mut Vec<u8>) {
     let button = e.dwButtonState;
     let movemt = e.dwEventFlags;
 
@@ -335,55 +333,55 @@ fn handle_mouse_event(e: &MOUSE_EVENT_RECORD) -> Vec<u8> {
             match button {
                 0 => {
                     // release
-                    seq = vec![b'\x1B', b'[', b'<', b'3', b';'];
+                    vts.write_all(&[ b'\x1B', b'[', b'<', b'3', b';']);
                     for x in cxbs {
-                        seq.push(x);
+                        vts.push(x);
                     }
-                    seq.push(b';');
+                    vts.push(b';');
                     for y in cybs {
-                        seq.push(y);
+                        vts.push(y);
                     }
-                    seq.push(b';');
-                    seq.push(b'm');
+                    vts.push(b';');
+                    vts.push(b'm');
                 }
                 1 => {
                     // left click
-                    seq = vec![b'\x1B', b'[', b'<', b'0', b';'];
+                    vts.write_all(&[b'\x1B', b'[', b'<', b'0', b';']);
                     for x in cxbs {
-                        seq.push(x);
+                        vts.push(x);
                     }
-                    seq.push(b';');
+                    vts.push(b';');
                     for y in cybs {
-                        seq.push(y);
+                        vts.push(y);
                     }
-                    seq.push(b';');
-                    seq.push(b'M');
+                    vts.push(b';');
+                    vts.push(b'M');
                 }
                 2 => {
                     // right click
-                    seq = vec![b'\x1B', b'[', b'<', b'2', b';'];
+                    vts.write_all(&[b'\x1B', b'[', b'<', b'2', b';']);
                     for x in cxbs {
-                        seq.push(x);
+                        vts.push(x);
                     }
-                    seq.push(b';');
+                    vts.push(b';');
                     for y in cybs {
-                        seq.push(y);
+                        vts.push(y);
                     }
-                    seq.push(b';');
-                    seq.push(b'M');
+                    vts.push(b';');
+                    vts.push(b'M');
                 }
                 4 => {
                     // middle click
-                    seq = vec![b'\x1B', b'[', b'<', b'1', b';'];
+                    vts.write_all(&[ b'\x1B', b'[', b'<', b'1', b';']);
                     for x in cxbs {
-                        seq.push(x);
+                        vts.push(x);
                     }
-                    seq.push(b';');
+                    vts.push(b';');
                     for y in cybs {
-                        seq.push(y);
+                        vts.push(y);
                     }
-                    seq.push(b';');
-                    seq.push(b'M');
+                    vts.push(b';');
+                    vts.push(b'M');
                 }
                 _ => (),
             }
@@ -392,16 +390,16 @@ fn handle_mouse_event(e: &MOUSE_EVENT_RECORD) -> Vec<u8> {
             // Click + Move
             // NOTE (@imdaveho) only register when mouse is not released
             if button != 0 {
-                seq = vec![b'\x1B', b'[', b'<', b'3', b'2', b';'];
+                vts.write_all(&[b'\x1B', b'[', b'<', b'3', b'2', b';']);
                 for x in cxbs {
-                    seq.push(x);
+                    vts.push(x);
                 }
-                seq.push(b';');
+                vts.push(b';');
                 for y in cybs {
-                    seq.push(y);
+                    vts.push(y);
                 }
-                seq.push(b';');
-                seq.push(b'M');
+                vts.push(b';');
+                vts.push(b'M');
             } else {
                 ()
             }
@@ -413,33 +411,32 @@ fn handle_mouse_event(e: &MOUSE_EVENT_RECORD) -> Vec<u8> {
             // from testing it looks like getting the "high word" or (button >> 16) as a signed int
             if ((button >> 16) as i16) >= 0 {
                 // WheelUp
-                seq = vec![b'\x1B', b'[', b'<', b'6', b'4', b';'];
+                vts.write_all(&[b'\x1B', b'[', b'<', b'6', b'4', b';']);
                 for x in cxbs {
-                    seq.push(x);
+                    vts.push(x);
                 }
-                seq.push(b';');
+                vts.push(b';');
                 for y in cybs {
-                    seq.push(y);
+                    vts.push(y);
                 }
-                seq.push(b';');
-                seq.push(b'M');
+                vts.push(b';');
+                vts.push(b'M');
             } else {
                 // WheelDown
-                seq = vec![b'\x1B', b'[', b'<', b'6', b'5', b';'];
+                vts.write_all(&[ b'\x1B', b'[', b'<', b'6', b'5', b';']);
                 for x in cxbs {
-                    seq.push(x);
+                    vts.push(x);
                 }
-                seq.push(b';');
+                vts.push(b';');
                 for y in cybs {
-                    seq.push(y);
+                    vts.push(y);
                 }
-                seq.push(b';');
-                seq.push(b'M');
+                vts.push(b';');
+                vts.push(b'M');
             }
         }
         0x2 => (), // NOTE (@imdaveho): double click not supported by unix terminals
         0x8 => (), // NOTE (@imdaveho): horizontal scroll not supported by unix terminals
         _ => (),   // TODO: Handle Ctrl + Mouse, Alt + Mouse, etc.
     };
-    return seq;
 }
